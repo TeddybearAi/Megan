@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install only what tests need; skip GPU/voice-only packages
+          pip install pytest numpy
+          # If a CI-only requirements file exists, use it; else install runtime requirements
+          if [ -f requirements-ci.txt ]; then
+            pip install -r requirements-ci.txt
+          elif [ -f requirements.txt ]; then
+            # Skip heavy/optional deps the test suite doesn't strictly need
+            grep -v -E "^(faster-whisper|piper-tts|torch|sentence-transformers)" requirements.txt > requirements-ci-auto.txt || cp requirements.txt requirements-ci-auto.txt
+            pip install -r requirements-ci-auto.txt || true
+          fi
+
+      - name: Run AISM unit tests
+        run: |
+          # Run only the unit-test files that don't require GPU/voice
+          pytest tests/ -v \
+            --ignore=tests/test_voice_integration.py \
+            -m "not gpu and not slow" \
+            || pytest tests/ -v --ignore=tests/test_voice_integration.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}

@@ -1,0 +1,159 @@
+"""
+mlops/build_dataset.py
+======================
+Samples ~40 user turns from the raw conversation log and writes a labelled
+evaluation dataset to mlops/dataset.csv.
+
+Each row carries the original user turn plus four label columns:
+    expects_evidence    : 1 if Stage 2 should produce >= 1 evidence item, else 0
+    trait               : the trait that should update, or "" if none
+    expected_value      : the expected value (scalar e.g. 0.9, or categorical e.g. "short")
+    notes               : a short rationale
+
+These labels are the "ground truth" the HPO sweep optimises against. Labels
+were authored to reflect Teddy's actual speech patterns and stated
+preferences as expressed across the Sprint 3 patch notes and conversations.
+
+Run:
+    python mlops/build_dataset.py
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import random
+from pathlib import Path
+
+RAW_LOG = Path(__file__).parent.parent / "aism_data" / "interactive_user" / "raw_log.json"
+OUT_CSV = Path(__file__).parent / "dataset.csv"
+
+# Manually selected & labelled sentences. We pick a mix of:
+#   - clear style-preference signals (positive cases)
+#   - content-only turns that look like signals but shouldn't update (negative cases)
+#   - sentences containing borderline phrases that test the Layer B threshold
+#
+# The selection deliberately includes Teddy's "tell me X" pattern multiple
+# times because it dominates the current Layer B false-positive class.
+LABELLED_DATASET = [
+    # ── Clear style-preference signals (positive cases) ──────────────────
+    ("be concise please", 1, "verbosity", "short",
+     "explicit imperative — verbosity:short lexicon Layer A hit"),
+    ("can you keep it short next time?", 1, "verbosity", "short",
+     "explicit imperative — Layer A 'keep it short'"),
+    ("that was way too long my dear", 1, "verbosity", "short",
+     "explicit feedback — Layer A 'too long'"),
+    ("stop hedging and just answer the question", 1, "directness", 0.9,
+     "explicit directness signal — Layer A 'stop hedging'"),
+    ("don't sugarcoat it, just tell me what you think", 1, "directness", 0.9,
+     "explicit directness signal — Layer A 'don't sugarcoat'"),
+    ("be more direct with me", 1, "directness", 0.9,
+     "explicit directness signal — Layer A 'be more direct'"),
+    ("less enthusiastic please, drop the cheer", 1, "warmth", 0.3,
+     "explicit low-warmth signal — Layer A 'less enthusiastic'"),
+    ("can you be more empathetic about this?", 1, "warmth", 0.8,
+     "explicit high-warmth signal — Layer A 'more empathetic'"),
+    ("you're not funny enough, try harder", 1, "humour", 0.8,
+     "explicit polarity flip — Layer A 'not funny enough'"),
+    ("don't use bullet points, write in paragraphs", 1, "formatting", "paragraphs",
+     "explicit formatting signal — Layer A 'don't use bullet'"),
+    ("can you use bullets for this list?", 1, "formatting", "bullets",
+     "explicit formatting signal — Layer A 'use bullets'"),
+    ("be a little bit funnier", 1, "humour", 0.8,
+     "explicit humour signal — Teddy's actual phrasing from logs"),
+
+    # ── Content turns that shouldn't update (negative cases) ─────────────
+    ("tell me about my dream coach", 0, "", "",
+     "FALSE POSITIVE risk — Layer B matches 'tell me' → directness=0.9"),
+    ("tell me, tell me, tell me", 0, "", "",
+     "FALSE POSITIVE risk — Layer B matches 'just tell me' → directness=0.9"),
+    ("tell me a joke please, a light one", 0, "", "",
+     "content request, not a style preference"),
+    ("tell me again what is your purpose of existence", 0, "", "",
+     "content query — 'tell me' is question-phrasing, not directness"),
+    ("I'm joking, don't take it seriously", 0, "", "",
+     "FALSE POSITIVE risk — Layer B matches 'stop joking' → humour=0.2"),
+    ("I'm just joking, calm down", 0, "", "",
+     "self-description of joking, not a humour-low instruction"),
+    ("good morning, it's raining outside today", 0, "", "",
+     "FALSE POSITIVE risk — Layer B has caught this as 'too enthusiastic'"),
+    ("I went to the gym this morning, exhausted now", 0, "", "",
+     "pure content, no style content"),
+    ("my dad's name is Jianhua, he's 72", 0, "", "",
+     "factual introduction — for Person Bank, not AISM"),
+    ("what is my favorite color", 0, "", "",
+     "interrogative — no style information"),
+    ("how old am I", 0, "", "",
+     "interrogative — no style information"),
+    ("do you remember Vahid", 0, "", "",
+     "memory query — no style information"),
+
+    # ── Borderline / Teddy-style phrasings ───────────────────────────────
+    ("shorter please", 1, "verbosity", "short",
+     "BORDERLINE — Layer A misses (no 'make it shorter' match), should Layer B catch?"),
+    ("less emojis", 1, "formatting", "no-emojis",
+     "OUT-OF-LEXICON — system has no emoji concept; documents the gap"),
+    ("just give me the answer", 1, "directness", 0.9,
+     "BORDERLINE — Layer A misses; semantically clear directness"),
+    ("can you just answer the question without all the preamble", 1, "directness", 0.9,
+     "Layer A 'skip the preamble' hit possible"),
+    ("less hedging in your replies", 1, "directness", 0.9,
+     "BORDERLINE — semantically clear, lexicon doesn't have this exact phrasing"),
+    ("your introduction is a little bit too formal", 1, "verbosity", "short",
+     "Teddy's actual phrasing — confirms verbosity:short in real use"),
+    ("number four is exactly what I'm doing right now", 0, "", "",
+     "FALSE POSITIVE risk — Teddy's phrasing has been caught as positive feedback"),
+
+    # ── Mixed signals (multiple legitimate updates) ──────────────────────
+    ("be concise, but also warmer", 1, "verbosity", "short",
+     "multi-trait — verbosity hit is primary; warmth secondary"),
+    ("I prefer short and direct replies, no fluff", 1, "verbosity", "short",
+     "multi-trait — 'no fluff' may hit directness in Layer A"),
+
+    # ── Pure content (no preference, clean negatives) ────────────────────
+    ("I had a long day at work today", 0, "", "",
+     "pure content, no style information"),
+    ("the gym was really busy this morning", 0, "", "",
+     "pure content"),
+    ("I think I want to go for a walk later", 0, "", "",
+     "pure content, INTENT not style"),
+    ("can we talk about something else?", 0, "", "",
+     "topic-change request, not style"),
+    ("I'm feeling much better now", 0, "", "",
+     "emotional content, not style preference"),
+    ("oh my god I love that idea", 0, "", "",
+     "positive reaction to content, not style preference"),
+    ("hmm, I'm not sure about that one", 0, "", "",
+     "expression of doubt, not style preference"),
+    ("can you remember that for me?", 0, "", "",
+     "explicit-remember signal — for LTM, not AISM style"),
+]
+
+
+def main():
+    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+
+    with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["text", "expects_evidence", "trait", "expected_value", "notes"])
+        for row in LABELLED_DATASET:
+            writer.writerow(row)
+
+    print(f"Wrote {len(LABELLED_DATASET)} labelled examples to {OUT_CSV}")
+    print()
+
+    # Sanity summary
+    pos = sum(1 for r in LABELLED_DATASET if r[1] == 1)
+    neg = sum(1 for r in LABELLED_DATASET if r[1] == 0)
+    print(f"  Positive cases (should update profile):  {pos}")
+    print(f"  Negative cases (should NOT update):      {neg}")
+    print()
+    print("  Trait distribution among positives:")
+    from collections import Counter
+    traits = Counter(r[2] for r in LABELLED_DATASET if r[1] == 1)
+    for trait, n in traits.most_common():
+        print(f"    {trait:14s} {n}")
+
+
+if __name__ == "__main__":
+    main()

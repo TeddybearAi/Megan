@@ -1,0 +1,39 @@
+# Megan — Python dependencies
+# Recreate the venv with:
+#   python -m venv .venv
+#   .venv\Scripts\Activate.ps1     (Windows PowerShell)
+#   source .venv/bin/activate      (Linux/macOS)
+#   pip install -r requirements.txt
+
+# Web server
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0
+python-multipart>=0.0.9   # required by FastAPI for UploadFile / multipart form data
+
+# TTS (local, neural). The OHF-Voice/piper1-gpl fork — rhasspy/piper was
+# archived Oct 2025; piper-tts on PyPI is the active maintained version.
+# Ships Windows/Linux/macOS wheels with espeak-ng bundled. The voice
+# .onnx model is downloaded separately via scripts/download_piper_voice.py.
+piper-tts>=1.4
+
+# STT (local, GPU)
+faster-whisper>=1.0
+numpy>=1.24
+
+# Semantic embeddings for memory retrieval and consolidation.
+# Used by aism.embedder.SentenceTransformerEmbedder. The first run
+# downloads the all-MiniLM-L6-v2 model (~90MB) into the local
+# huggingface cache; subsequent runs are offline.
+# Without this package installed, the system falls back to the
+# zero-dependency CharacterNgramEmbedder (coarser, character-level).
+sentence-transformers>=2.7
+
+# CUDA runtime libraries needed by faster-whisper on Windows.
+# These ship the cuBLAS / cuDNN / NVRTC DLLs so CTranslate2 can find
+# them inside the venv without a system CUDA Toolkit install.
+# On Linux you usually don't need these (system libs work).
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+
+tzdata>=2024.1
